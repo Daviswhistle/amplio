@@ -105,3 +105,7 @@ If you find Amplio helpful, please cite the following BibTeX:
   url          = {https://github.com/google-deepmind/amplio}
 }
 ```
+
+## Experimental ChatGPT and OpenAI Responses integration
+
+An optional subprocess bridge supports both OpenAI API keys and isolated ChatGPT/Codex subscription OAuth login. See [setup and limitations](docs/guide/chatgpt-bridge.md); no core changes or credentials are committed.
