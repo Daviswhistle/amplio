@@ -102,8 +102,11 @@ def save_validated(data: dict[str, Any], *, expected_subject: str | None = None)
         raise AuthError("Unexpected OAuth issuer")
     if not isinstance(data.get("scopes"), list):
         raise AuthError("OAuth credential record missing granted scopes")
-    if PLAN_SCOPE in data["scopes"] and not data.get("refresh_token"):
-        raise AuthError("ChatGPT plan usage requires a renewable access token")
+    if PLAN_SCOPE in data["scopes"]:
+        if "resource.invoke" not in data["scopes"]:
+            raise AuthError("ChatGPT plan usage requires resource.invoke permission")
+        if not data.get("refresh_token"):
+            raise AuthError("ChatGPT plan usage requires a renewable access token")
     with _locked():
         if expected_subject is not None:
             previous = _read(credential_path())
@@ -177,7 +180,7 @@ def _update_refresh(data: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(payload["scope"], str):
             raise AuthError("OAuth refresh returned malformed scope")
         updated["scopes"] = payload["scope"].split()
-        if PLAN_SCOPE not in updated["scopes"]:
+        if PLAN_SCOPE not in updated["scopes"] or "resource.invoke" not in updated["scopes"]:
             # Save the reduced scopes first, so no later subprocess can use
             # the previous grant after the server has revoked plan usage.
             _write(credential_path(), updated)
@@ -190,7 +193,7 @@ def get_access_token(*, force_refresh: bool = False, previous_token: str | None 
     """Refresh once for a shared session; avoids races across subprocesses."""
     with _locked():
         data = _read(credential_path())
-        if PLAN_SCOPE not in data.get("scopes", []):
+        if PLAN_SCOPE not in data.get("scopes", []) or "resource.invoke" not in data.get("scopes", []):
             raise AuthError("ChatGPT plan permission not granted; sign in again")
         access = data.get("access_token")
         if not access:
