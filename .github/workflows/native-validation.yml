@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +33,11 @@ jobs:
       - name: Frontend type check
         run: npm ci && npm run check
         working-directory: frontend
+      - name: Inspect inherited dependency advisories
+        working-directory: frontend
+        run: |
+          npm audit --json > /tmp/amplio-audit.json || true
+          node -e 'const a=require("/tmp/amplio-audit.json"); console.log(JSON.stringify(a.metadata)); for(const [name,v] of Object.entries(a.vulnerabilities||{})) console.log(JSON.stringify({name,severity:v.severity,range:v.range,fix:v.fixAvailable,via:v.via}));'
       - name: Build standalone application
         run: make build LOCAL_EMBED=0
       - name: Install browser test tooling
