@@ -187,6 +187,15 @@ func main() {
 		"Let agents search lessons mined from past runs (env AMPLIO_LESSON_SEARCH or config [lessons].search). "+
 			"--lesson-search=false isolates runs from other runs' lessons; mining and scoring still happen")
 
+	// A plain launch opens the same setup-capable application as `serve`.
+	root.Args = cobra.NoArgs
+	root.RunE = func(cmd *cobra.Command, _ []string) error {
+		cfg, err := resolveWebConfig(cmd)
+		if err != nil {
+			return err
+		}
+		return executeServe(cfg, "", "")
+	}
 	root.AddCommand(serveCmd(), notifyCmd(), headlessCmd(), clientCmd())
 	if err := root.Execute(); err != nil {
 		os.Exit(exitCodeFor(err))

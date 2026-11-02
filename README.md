@@ -22,7 +22,18 @@ The first build also downloads a 130 MB embedding model (cached) to build the
 local recall table; `make build LOCAL_EMBED=0` skips it, and recall then ranks by
 keyword match alone.
 
-## Quick start
+## First run: ChatGPT or OpenAI API
+
+After building, run `./amplio` and open its private startup URL. The **Providers**
+page handles ChatGPT sign-in, API key storage, account model discovery, tests and
+model defaults. No config file, Python or separate setup/login executable is
+required. Settings apply without a restart. See [Providers](docs/guide/providers.md)
+for remote browser completion, migration and verification boundaries.
+
+The native integration has automated mock-provider and browser coverage; live
+OpenAI account eligibility and model access still require an authorized account.
+
+## Quick start (manual configuration)
 
 Amplio needs two things: a **data directory** (a local SQLite database and
 everything else it owns) and an **LLM provider**.

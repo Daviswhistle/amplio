@@ -1,0 +1,46 @@
+name: Native providers and onboarding
+on:
+  push:
+    branches: [feature/chatgpt-openai-responses-bridge]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: go test ./...
+      - run: go test -race ./internal/providerstate ./internal/llm/responses ./internal/server ./cmd/amplio
+      - run: npm ci && npm run check && npm audit --audit-level=high
+        working-directory: frontend
+      - run: make build LOCAL_EMBED=0
+      - name: Install browser test tooling (test-only)
+        run: |
+          npm install --prefix /tmp/amplio-playwright --no-save --package-lock=false playwright@1.55.1
+          /tmp/amplio-playwright/node_modules/.bin/playwright install --with-deps chromium
+      - run: node tests/e2e/providers.mjs
+        env:
+          PLAYWRIGHT_HOME: /tmp/amplio-playwright
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: providers-browser
+          path: providers-mobile.png
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        with:
+          name: amplio-linux-amd64
+          path: |
+            amplio
+            LICENSE
+            THIRD_PARTY_NOTICES.txt

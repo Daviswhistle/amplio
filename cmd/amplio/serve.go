@@ -26,6 +26,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	"amplio/internal/config"
@@ -52,7 +53,7 @@ func serveCmd() *cobra.Command {
 			" <data-dir>/config.toml (see --data-dir); the bind address may also be set" +
 			" via --listen or $AMPLIO_LISTEN.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := resolveConfig(cmd)
+			cfg, err := resolveWebConfig(cmd)
 			if err != nil {
 				return err
 			}
@@ -89,13 +90,9 @@ func addrFrom(flagVal, envVal, cfgVal string) string {
 
 func executeServe(cfg config.Config, listenOverride, lendOverride string) error {
 	dataDir := config.DataDir()
-	// System tiers are already validated by resolveConfig. --listen has its own
-	// serve-only precedence (flag > env > resolved config). serve additionally
-	// needs the agent model menu for the manager provider + UI default.
+	// The web server starts before credentials/models exist. System bindings
+	// become usable when the owner completes Providers; headless stays strict.
 	cfg.Listen = listenAddr(listenOverride, os.Getenv(config.EnvListen), cfg.Listen)
-	if cfg.DefaultLLM() == "" {
-		return fmt.Errorf("no agent model: set run.llms in %s", config.ConfigPath(dataDir))
-	}
 
 	// Take the data-dir owner lock before touching the DB so we never run two
 	// servers (or a server + headless run) against one DB.
@@ -104,6 +101,11 @@ func executeServe(cfg config.Config, listenOverride, lendOverride string) error 
 		return err
 	}
 	defer func() { _ = lock.Unlock() }()
+	cfg, accounts, err := prepareWebModels(cfg)
+	if err != nil {
+		return err
+	}
+	defer accounts.Close()
 
 	// Mirror logs to a timestamped file on disk so operators can grep for
 	// failures after a serve session ends without needing to have tailed the
@@ -201,13 +203,28 @@ func executeServe(cfg config.Config, listenOverride, lendOverride string) error 
 	// the scheduled count here as a coarse signal for diagnosing the suspected
 	// recovery-driven OOM (see oom_deepdive); detailed memory sampling can be added
 	// later if the count implicates recovery.
-	recovered := recoverRuns(ctx, store, mgr)
-	slog.Info("recovery scheduled", "sessions", recovered)
-
-	// Backfill any missing reports for already-concluded runs, in the background
-	// (off the startup path) and sequentially (one at a time, to bound HQ-LLM
-	// load). Idempotent: runs already covered by a report are cheap no-ops.
-	go backfillReports(ctx, store, fin)
+	// Do not invoke models before first-time setup. Existing configured
+	// installations recover normally; completing setup activates recovery once.
+	var activated sync.Once
+	activate := func() {
+		activated.Do(func() {
+			go func() {
+				if ctx.Err() != nil {
+					return
+				}
+				recovered := recoverRuns(ctx, store, mgr)
+				slog.Info("recovery scheduled", "sessions", recovered)
+				backfillReports(ctx, store, fin)
+			}()
+		})
+	}
+	selected, err := accounts.Settings()
+	if err != nil {
+		return err
+	}
+	if selected.Ready() {
+		activate()
+	}
 
 	// Web auth: reads are open (the readonly share view); writes need this token,
 	// presented as an HttpOnly cookie (browser, after the magic-link exchange) or
@@ -292,7 +309,7 @@ func executeServe(cfg config.Config, listenOverride, lendOverride string) error 
 	// HTTP log middleware: quiet by default (2xx → Debug, hidden at info level),
 	// chatty on failures (4xx Warn, 5xx Error), one-line-on-close for SSE. Cost
 	// is ~10 µs/request — negligible at our scale.
-	handler := amlog.HTTPMiddleware(srv.Handler())
+	handler := amlog.HTTPMiddleware(srv.ProviderHandler(accounts, activate))
 	httpServer := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
