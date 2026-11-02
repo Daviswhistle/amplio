@@ -16,7 +16,7 @@
 
 import type { Component } from 'svelte';
 import type { IconComponentProps } from 'phosphor-svelte';
-import { RowsIcon, PulseIcon, BellIcon, BookOpenIcon, InfoIcon } from 'phosphor-svelte';
+import { RowsIcon, PulseIcon, BellIcon, BookOpenIcon, InfoIcon, KeyIcon } from 'phosphor-svelte';
 
 /** Inside a run, whose shell brings its own bar and nav. */
 export const isRunPath = (path: string) => path.startsWith('/runs/');
@@ -56,6 +56,7 @@ export function globalDestinations(activeCount: number, unreadCount: number, rea
 			tone: 'unread'
 		},
 		{ label: 'Recall', href: '/recall', icon: BookOpenIcon },
+        { label: 'Providers', href: '/providers', icon: KeyIcon },
 		{ label: 'About', href: '/about', icon: InfoIcon }
 	];
 	return readonly ? all.filter((d) => d.href === '/about') : all;

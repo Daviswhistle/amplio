@@ -17,6 +17,8 @@
 <script lang="ts">
 	import '../app.css';
 	import { onMount, untrack } from 'svelte';
+	import { goto } from '$app/navigation';
+	import { providers } from '$lib/providers';
 	import { page } from '$app/state';
 	import { auth } from '$lib/auth.svelte';
 	import { api } from '$lib/api';
@@ -30,6 +32,17 @@
 	import ServerStatusBanner from '$lib/components/ServerStatusBanner.svelte';
 
 	let { children } = $props();
+
+	// A new install reaches setup from the application itself, not a shell
+	// bootstrap. Never redirect shared/read-only viewers or an active run.
+	$effect(() => {
+		if (!auth.ready || !auth.authed || page.url.pathname !== '/') return;
+		let cancelled = false;
+		void providers.status().then((status) => {
+			if (!cancelled && status.setup_required) void goto('/providers', { replaceState: true });
+		}).catch(() => {});
+		return () => { cancelled = true; };
+	});
 
 	// Seed once on app mount. auth.init() resolves read/write status (drives the
 	// readonly UI); any ?token= was already exchanged in hooks.client.ts. sysstat
