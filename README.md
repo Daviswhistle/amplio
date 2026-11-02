@@ -106,6 +106,14 @@ If you find Amplio helpful, please cite the following BibTeX:
 }
 ```
 
-## Experimental ChatGPT and OpenAI Responses integration
+## Experimental OpenAI Responses integration
 
-An optional subprocess bridge supports both OpenAI API keys and isolated ChatGPT/Codex subscription OAuth login. See [setup and limitations](docs/guide/chatgpt-bridge.md); no core changes or credentials are committed.
+An optional Python subprocess bridge connects OpenAI's public Responses API
+using either an API key or the official open-source **Sign in with ChatGPT**
+dynamic OAuth flow. Login credentials and API billing remain strictly
+separate; the bridge never silently switches payment methods. The bridge
+uses only the public API endpoint, not ChatGPT's private backend APIs.
+
+See [setup, security and verification limitations](docs/guide/chatgpt-bridge.md).
+The integration remains experimental until live sign-in, model tool calls and
+multi-agent restart recovery are verified.
