@@ -1,0 +1,61 @@
+name: Isolated native provider validation
+on:
+  push:
+    branches: [work/native-providers-20261102]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: native-provider-validation
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Assemble frozen native change
+        run: python3 .native-build/assemble.py
+      - name: Entire Go suite
+        run: go test ./...
+      - name: Provider and server race tests
+        run: go test -race ./internal/providerstate ./internal/llm/responses ./internal/server ./cmd/amplio
+      - name: Frontend type check
+        run: npm ci && npm run check
+        working-directory: frontend
+      - name: Build standalone application
+        run: make build LOCAL_EMBED=0
+      - name: Install browser test tooling
+        run: |
+          npm install --prefix /tmp/amplio-playwright --no-save --package-lock=false playwright@1.55.1
+          /tmp/amplio-playwright/node_modules/.bin/playwright install --with-deps chromium
+      - name: Compiled-server first-run and restart browser tests
+        run: node tests/e2e/providers.mjs
+        env:
+          PLAYWRIGHT_HOME: /tmp/amplio-playwright
+      - name: Publish tested Git tree without moving the PR branch
+        run: python3 .native-build/assemble.py publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-provider-validation
+          path: |
+            providers-mobile.png
+            native-validated-tree.json
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        with:
+          name: amplio-linux-amd64
+          path: amplio
