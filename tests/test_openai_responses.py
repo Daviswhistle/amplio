@@ -1,7 +1,6 @@
 """Offline contract tests for the Amplio ChatGPT/Responses bridge."""
 from __future__ import annotations
 
-import base64
 import importlib.util
 import io
 import http.client
@@ -10,20 +9,17 @@ import threading
 import json
 import os
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from unittest import mock
+import sys
+import urllib.error
 
 SCRIPT = Path(__file__).resolve().parents[1] / "bridges" / "openai_responses.py"
+sys.path.insert(0, str(SCRIPT.parent))
 spec = importlib.util.spec_from_file_location("openai_responses_bridge", SCRIPT)
 bridge = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bridge)
-
-
-def make_jwt(payload):
-    text = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
-    return "fake." + text + ".sig"
 
 
 class ResponseTests(unittest.TestCase):
@@ -59,7 +55,7 @@ class ResponseTests(unittest.TestCase):
         body = bridge.build_body(self.request, "chatgpt")
         self.assertNotIn("max_output_tokens", body)
         self.assertNotIn("temperature", body)
-        self.assertNotIn("include", body)
+        self.assertEqual(body["include"], ["reasoning.encrypted_content"])
         self.assertFalse(body["store"])
 
     def test_disable_tools_retains_definitions(self):
@@ -67,6 +63,16 @@ class ResponseTests(unittest.TestCase):
         body = bridge.build_body(self.request, "chatgpt")
         self.assertEqual(body["tool_choice"], "none")
         self.assertEqual(len(body["tools"]), 1)
+        self.assertEqual(body["tools"][0]["type"], "namespace")
+        self.assertEqual(body["tools"][0]["name"], "amplio")
+        self.assertEqual(body["tools"][0]["tools"][0]["name"], "shell")
+
+    def test_namespace_tool_calls_are_mapped_back_to_amplio(self):
+        output = bridge.parse_response({"status": "completed", "output": [
+            {"type": "function_call", "call_id": "c1", "name": "amplio.shell", "arguments": "{}"}
+        ]})
+        self.assertEqual(output["tool_calls"][0]["name"], "shell")
+        self.assertEqual(output["provider_extra"][bridge.OUTPUT_ITEMS_EXTRA_KEY][0]["name"], "amplio.shell")
 
     def test_opaque_reasoning_roundtrip(self):
         res = bridge.parse_response({"status": "completed", "output": [
@@ -172,50 +178,69 @@ class ResponseTests(unittest.TestCase):
                 if worker.is_alive():
                     worker.join(timeout=2)
 
+    def test_subscription_uses_official_public_endpoint(self):
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "unrelated-private-api-key"}), \
+             mock.patch.object(bridge.siwc_auth, "get_access_token", return_value="siwc-token"):
+            endpoint, headers = bridge.auth_headers("chatgpt")
+        self.assertEqual(endpoint, "https://api.openai.com/v1/responses")
+        self.assertEqual(headers["Authorization"], "Bearer siwc-token")
+        self.assertNotIn("ChatGPT-Account-Id", headers)
+        self.assertNotIn("OpenAI-Project", headers)
+
     def test_no_implicit_fallback_to_api(self):
-        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-not-for-subscription"}):
-            with mock.patch.object(bridge, "chatgpt_credentials", side_effect=bridge.BridgeError("OAuth missing")):
-                with self.assertRaisesRegex(bridge.BridgeError, "OAuth missing"):
-                    bridge.auth_headers("chatgpt")
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "unrelated-api-key"}), \
+             mock.patch.object(bridge.siwc_auth, "get_access_token", side_effect=bridge.siwc_auth.AuthError("OAuth missing")):
+            with self.assertRaisesRegex(bridge.siwc_auth.AuthError, "OAuth missing"):
+                bridge.auth_headers("chatgpt")
 
-    def test_subscription_credentials_refresh_to_dedicated_file(self):
-        now = int(time.time())
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "auth.json"
-            access = make_jwt({"exp": now - 10, "https://api.openai.com/auth": {"chatgpt_account_id": "acct_1"}})
-            updated = make_jwt({"exp": now + 3600, "https://api.openai.com/auth": {"chatgpt_account_id": "acct_1"}})
-            path.write_text(json.dumps({"tokens": {"access_token": access, "refresh_token": "ref-test"}}))
-            def refresh(previous):
-                other = json.loads(json.dumps(previous))
-                other["tokens"]["access_token"] = updated
-                other["tokens"]["refresh_token"] = "ref-new"
-                return other
-            with mock.patch.dict(os.environ, {"AMPLIO_CODEX_AUTH_FILE": str(path)}), \
-                 mock.patch.object(bridge, "_refresh_tokens", side_effect=refresh):
-                token, account = bridge.chatgpt_credentials()
-            self.assertEqual(token, updated)
-            self.assertEqual(account, "acct_1")
-            self.assertEqual(json.loads(path.read_text())["tokens"]["refresh_token"], "ref-new")
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+    def test_http_429_retries_only_for_ordinary_rate_limits(self):
+        def make_error(code):
+            body = json.dumps({"error": {"code": code, "message": "token=secret-value"}}).encode()
+            return urllib.error.HTTPError("https://api.openai.com/v1/responses", 429,
+                                          "Too Many Requests", {"x-request-id": "req_123"}, io.BytesIO(body))
+        normal, _ = bridge._http_failure(make_error("rate_limit_exceeded"), "api")
+        self.assertIn("(code 429)", str(normal))
+        self.assertNotIn("secret-value", str(normal))
+        subscription, _ = bridge._http_failure(make_error("subscription_sharing_usage_limit_exceeded"), "chatgpt")
+        self.assertIn("usage limit", str(subscription))
+        self.assertNotIn("(code 429)", str(subscription))
 
-    def test_custom_codex_home(self):
-        now = int(time.time())
-        with tempfile.TemporaryDirectory() as directory:
-            auth_path = Path(directory) / "auth.json"
-            token = make_jwt({"exp": now + 3600, "https://api.openai.com/auth": {
-                "chatgpt_account_id": "acct_custom"}})
-            auth_path.write_text(json.dumps({"tokens": {"access_token": token}}))
-            with mock.patch.dict(os.environ, {"AMPLIO_CODEX_HOME": directory}, clear=True):
-                actual_token, account = bridge.chatgpt_credentials()
-            self.assertEqual(actual_token, token)
-            self.assertEqual(account, "acct_custom")
+    def test_retries_one_expired_authentication_and_does_not_switch_billing(self):
+        err = urllib.error.HTTPError("https://api.openai.com/v1/responses", 401, "Unauthorized", {},
+                                    io.BytesIO(b'{"error":{"code":"invalid_token"}}'))
+        with mock.patch.object(bridge, "auth_headers", return_value=(bridge.API_ENDPOINT, {"Authorization": "Bearer bad"})), \
+             mock.patch.object(bridge.urllib.request, "urlopen", side_effect=[err, io.BytesIO(b'ok')]) as opened, \
+             mock.patch.object(bridge.siwc_auth, "get_access_token", return_value="new") as refreshed:
+            result = bridge._open_responses(b'{}', "chatgpt")
+        self.assertEqual(result.read(), b'ok')
+        self.assertEqual(opened.call_count, 2)
+        refreshed.assert_called_once_with(force_refresh=True, previous_token="bad")
 
-    def test_unavailable_auth_fails(self):
-        with tempfile.TemporaryDirectory() as directory:
-            with mock.patch.dict(os.environ, {"AMPLIO_CODEX_AUTH_FILE": directory + "/none"}):
-                with self.assertRaisesRegex(bridge.BridgeError, "Dedicated Codex login"):
-                    bridge.chatgpt_credentials()
+    def test_invalid_user_401_is_not_retried(self):
+        exc = urllib.error.HTTPError("https://api.openai.com/v1/responses", 401, "Unauthorized", {},
+                                     io.BytesIO(b'{"error":{"code":"subscription_sharing_invalid_user"}}'))
+        with mock.patch.object(bridge, "auth_headers", return_value=(bridge.API_ENDPOINT, {"Authorization": "Bearer old"})), \
+             mock.patch.object(bridge.urllib.request, "urlopen", side_effect=exc) as opened, \
+             mock.patch.object(bridge.siwc_auth, "get_access_token") as refreshed:
+            with self.assertRaises(bridge.BridgeError):
+                bridge._open_responses(b'{}', "chatgpt")
+        opened.assert_called_once()
+        refreshed.assert_not_called()
 
+    def test_stream_incomplete_never_returns_success(self):
+        evt = b'data: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}\n\n'
+        with mock.patch.object(bridge, "auth_headers", return_value=(bridge.API_ENDPOINT, {})), \
+             mock.patch.object(bridge.urllib.request, "urlopen", return_value=io.BytesIO(evt)):
+            with self.assertRaisesRegex(bridge.BridgeError, "incomplete"):
+                list(bridge.generate({"model": "gpt-test"}, "api", ""))
+
+    def test_stream_subscription_limit_never_retries(self):
+        evt = b'data: {"type":"response.failed","response":{"error":{"code":"subscription_sharing_usage_limit_exceeded"}}}\n\n'
+        with mock.patch.object(bridge, "auth_headers", return_value=(bridge.API_ENDPOINT, {})), \
+             mock.patch.object(bridge.urllib.request, "urlopen", return_value=io.BytesIO(evt)):
+            with self.assertRaisesRegex(bridge.BridgeError, "usage limit") as ctx:
+                list(bridge.generate({"model": "gpt-test"}, "chatgpt", ""))
+        self.assertNotIn("(code 429)", str(ctx.exception))
 
 if __name__ == "__main__":
     unittest.main()
