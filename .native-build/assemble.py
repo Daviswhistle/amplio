@@ -26,6 +26,7 @@ def assemble():
     paths.update(MANIFEST['reset'])
     paths.update(MANIFEST['patches'])
     paths.update(MANIFEST['delete'])
+    paths.update(['frontend/package.json', 'frontend/package-lock.json', 'THIRD_PARTY_NOTICES.txt'])
     for path, ref in MANIFEST['reset'].items():
         Path(path).write_bytes(subprocess.check_output(['git', 'show', f'{ref}:{path}']))
     for source in files:
@@ -59,8 +60,6 @@ def api(method, path, data=None):
 
 def publish_tree():
     paths = json.loads(Path('.native-build/product-paths.json').read_text())
-    # Require the tested source to remain untouched after staging. Build output
-    # lives elsewhere and may not become part of the clean tree.
     subprocess.run(['git', 'diff', '--exit-code', '--', *paths], check=True)
     base_tree = api('GET', '/git/commits/' + BASE)['tree']['sha']
     changed = set(git('diff', '--name-only', BASE, '--', *paths).splitlines())
@@ -72,15 +71,15 @@ def publish_tree():
             continue
         content = file.read_bytes()
         blob = api('POST', '/git/blobs', {'content': base64.b64encode(content).decode(), 'encoding': 'base64'})['sha']
-        # Verify GitHub's object is exactly the tested bytes.
         expected = hashlib.sha1(f'blob {len(content)}\0'.encode() + content).hexdigest()
         assert blob == expected, f'blob verification failed: {path}'
         entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': blob})
-    tree = api('POST', '/git/trees', {'base_tree': base_tree, 'tree': entries})['sha']
-    result = {'base': BASE, 'tree': tree, 'changed_files': len(entries), 'validation_commit': os.environ['GITHUB_SHA'], 'files': entries}
+    # GitHub's Actions token intentionally cannot modify workflow trees. Export
+    # the tested blob references; the authorized connector will assemble the
+    # clean tree and update the PR with an expected-head lease. No branch writes.
+    result = {'base': BASE, 'base_tree': base_tree, 'changed_files': len(entries), 'validation_commit': os.environ['GITHUB_SHA'], 'files': entries}
     Path('native-validated-tree.json').write_text(json.dumps(result, indent=2))
-    print('NATIVE_TESTED_TREE=' + tree, flush=True)
-    print(json.dumps(result), flush=True)
+    print('NATIVE_TESTED_BLOBS=' + json.dumps(result), flush=True)
 
 if __name__ == '__main__':
     if len(sys.argv) == 2 and sys.argv[1] == 'publish': publish_tree()
