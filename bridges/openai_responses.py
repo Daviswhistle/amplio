@@ -1,164 +1,44 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # Experimental integration for google-deepmind/amplio.
-"""Amplio subprocess bridge for OpenAI Responses and ChatGPT Codex OAuth.
+"""Amplio subprocess bridge for OpenAI Responses (API key or official SIWC).
 
-Python standard library only. The OAuth mode reads a *dedicated* Codex CLI
-credential store made with CODEX_HOME=~/.config/amplio-chatgpt/codex-home codex login.
-Do not share a single rotating refresh token store with a running Codex CLI.
-
-Both modes use the Amplio /generate NDJSON protocol over a Unix socket.
-See google-deepmind/amplio: bridges/README.md.
+Both modes use the public /v1/responses endpoint and Amplio's NDJSON bridge
+protocol. ChatGPT credentials are issued by public dynamic OAuth registration,
+not borrowed from the Codex CLI or any private backend.
 """
 
 from __future__ import annotations
 
 import argparse
-import base64
-import datetime
-import fcntl
 import json
 import os
 import socketserver
-import stat
 import sys
-import tempfile
-import threading
-import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from http import server as http_server
-from pathlib import Path
 from typing import Any, Iterator
 
+import siwc_auth
+
 API_ENDPOINT = "https://api.openai.com/v1/responses"
-CHATGPT_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
-TOKEN_ENDPOINT = "https://auth.openai.com/oauth/token"
-# The public Codex CLI OAuth client ID, as used by open-source Codex clients.
-CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 REASONING_EXTRA_KEY = "openai_responses.reasoning_items"
 OUTPUT_ITEMS_EXTRA_KEY = "openai_responses.output_items"
-CREDENTIAL_LOCK = threading.Lock()
 MAX_HTTP_BODY = 32 * 1024 * 1024
 
 
-class BridgeError(Exception):
-    """Safe, actionable provider or configuration failure."""
-
-
-def _jwt_payload(token: str) -> dict[str, Any]:
-    try:
-        payload = token.split(".")[1]
-        payload += "=" * (-len(payload) % 4)
-        obj = json.loads(base64.urlsafe_b64decode(payload))
-        return obj if isinstance(obj, dict) else {}
-    except (IndexError, ValueError, TypeError):
-        return {}
-
-
-def _account_id(credentials: dict[str, Any]) -> str:
-    tokens = credentials.get("tokens") or {}
-    if tokens.get("account_id"):
-        return str(tokens["account_id"])
-    for name in ("id_token", "access_token"):
-        jwt = _jwt_payload(tokens.get(name) or "")
-        auth = jwt.get("https://api.openai.com/auth") or {}
-        if auth.get("chatgpt_account_id"):
-            return str(auth["chatgpt_account_id"])
-        if jwt.get("chatgpt_account_id"):
-            return str(jwt["chatgpt_account_id"])
-    return ""
-
-
-def _atomic_save_json(path: Path, content: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd, tmp = tempfile.mkstemp(prefix=".oauth-", dir=str(path.parent))
-    try:
-        os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(content, handle, ensure_ascii=False)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-
-
-def _refresh_tokens(credentials: dict[str, Any]) -> dict[str, Any]:
-    refresh_token = (credentials.get("tokens") or {}).get("refresh_token")
-    if not refresh_token:
-        raise BridgeError("ChatGPT OAuth refresh token missing; run dedicated 'codex login' again")
-    body = urllib.parse.urlencode({
-        "grant_type": "refresh_token", "client_id": CODEX_CLIENT_ID,
-        "refresh_token": refresh_token,
-    }).encode("utf-8")
-    request = urllib.request.Request(TOKEN_ENDPOINT, data=body, headers={
-        "Content-Type": "application/x-www-form-urlencoded",
-    }, method="POST")
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            obj = json.load(response)
-    except urllib.error.HTTPError as exc:
-        # Never echo OAuth error bodies: they may include credential fragments.
-        raise BridgeError(f"ChatGPT OAuth refresh failed (HTTP {exc.code}); re-run dedicated 'codex login'") from None
-    except (urllib.error.URLError, ValueError) as exc:
-        raise BridgeError(f"ChatGPT OAuth refresh unavailable: {type(exc).__name__}") from None
-    if not isinstance(obj, dict) or not obj.get("access_token"):
-        raise BridgeError("ChatGPT OAuth refresh did not return an access token")
-    new_creds = dict(credentials)
-    tokens = dict(new_creds.get("tokens") or {})
-    tokens["access_token"] = obj["access_token"]
-    if obj.get("refresh_token"):
-        tokens["refresh_token"] = obj["refresh_token"]
-    if obj.get("id_token"):
-        tokens["id_token"] = obj["id_token"]
-    new_creds["tokens"] = tokens
-    new_creds["last_refresh"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    return new_creds
-
-
-def chatgpt_credentials() -> tuple[str, str]:
-    default_home = Path(os.environ.get("AMPLIO_CODEX_HOME", "~/.config/amplio-chatgpt/codex-home")).expanduser()
-    path = Path(os.environ.get("AMPLIO_CODEX_AUTH_FILE") or default_home / "auth.json").expanduser()
-    # Each model spec can spawn a distinct subprocess. A process-local lock
-    # cannot protect rotating refresh tokens across those subprocesses.
-    with CREDENTIAL_LOCK:
-        lock_path = path.with_name(path.name + ".lock")
-        lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with lock_path.open("a+b") as lock_file:
-            os.fchmod(lock_file.fileno(), stat.S_IRUSR | stat.S_IWUSR)
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            try:
-                try:
-                    data = json.loads(path.read_text(encoding="utf-8"))
-                except (FileNotFoundError, ValueError) as exc:
-                    raise BridgeError("Dedicated Codex login not found; see guide: ./scripts/login_chatgpt.sh") from exc
-                tokens = data.get("tokens") or {}
-                access = tokens.get("access_token") or ""
-                if not access:
-                    raise BridgeError("No ChatGPT subscription access token; dedicated Codex login must use ChatGPT, not an API key")
-                expires_at = _jwt_payload(access).get("exp")
-                if not isinstance(expires_at, (int, float)) or expires_at <= time.time() + 300:
-                    data = _refresh_tokens(data)
-                    _atomic_save_json(path, data)
-                    access = data["tokens"]["access_token"]
-                account_id = _account_id(data)
-                if not account_id:
-                    raise BridgeError("ChatGPT account ID absent from dedicated Codex login")
-                return access, account_id
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+class BridgeError(siwc_auth.AuthError):
+    """Safe provider or configuration failure."""
 
 
 def auth_headers(auth: str) -> tuple[str, dict[str, str]]:
     headers = {"Content-Type": "application/json", "Accept": "text/event-stream",
-               "User-Agent": "amplio-openai-responses-bridge/0.1"}
+               "User-Agent": "amplio-openai-responses-bridge/0.2"}
     if auth == "api":
         key = os.environ.get("OPENAI_API_KEY", "")
         if not key:
-            raise BridgeError("OPENAI_API_KEY missing for API-credit mode")
+            raise BridgeError("OPENAI_API_KEY missing for API billing mode")
         headers["Authorization"] = "Bearer " + key
         if os.environ.get("OPENAI_ORGANIZATION"):
             headers["OpenAI-Organization"] = os.environ["OPENAI_ORGANIZATION"]
@@ -166,11 +46,8 @@ def auth_headers(auth: str) -> tuple[str, dict[str, str]]:
             headers["OpenAI-Project"] = os.environ["OPENAI_PROJECT"]
         return API_ENDPOINT, headers
     if auth == "chatgpt":
-        access, account_id = chatgpt_credentials()
-        headers.update({"Authorization": "Bearer " + access,
-                        "ChatGPT-Account-Id": account_id,
-                        "originator": "amplio"})
-        return CHATGPT_ENDPOINT, headers
+        headers["Authorization"] = "Bearer " + siwc_auth.get_access_token()
+        return API_ENDPOINT, headers
     raise BridgeError("Unknown auth mode; choose auth=api or auth=chatgpt")
 
 
@@ -232,6 +109,11 @@ def build_input(req: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
     return "\n\n".join(p for p in instructions if p), messages
 
 
+def _local_tool_name(name: str) -> str:
+    """Translate the SIWC namespace into the local Amplio tool registry."""
+    return name.removeprefix("amplio.")
+
+
 def build_body(req: dict[str, Any], auth: str, reasoning: str = "") -> dict[str, Any]:
     instructions, messages = build_input(req)
     body: dict[str, Any] = {"model": req["model"], "input": messages,
@@ -239,13 +121,19 @@ def build_body(req: dict[str, Any], auth: str, reasoning: str = "") -> dict[str,
     if instructions:
         body["instructions"] = instructions
     if req.get("tools"):
-        body["tools"] = [
+        definitions = [
             {"type": "function", "name": tool["name"],
              "description": tool.get("description", ""),
              "parameters": tool.get("schema") or {"type": "object", "properties": {}},
              "strict": False}
             for tool in req["tools"]
         ]
+        # The SIWC preview requires function tools to be inside a namespace.
+        # Keep API-key mode's regular flat function declarations unchanged.
+        body["tools"] = ([{"type": "namespace", "name": "amplio",
+                           "description": "Local tools controlled by the Amplio harness",
+                           "tools": definitions}]
+                         if auth == "chatgpt" else definitions)
         if req.get("disable_tool_calls"):
             body["tool_choice"] = "none"
     if auth == "api":
@@ -253,7 +141,8 @@ def build_body(req: dict[str, Any], auth: str, reasoning: str = "") -> dict[str,
             body["max_output_tokens"] = int(req["max_tokens"])
         if req.get("temperature") is not None:
             body["temperature"] = req["temperature"]
-        body["include"] = ["reasoning.encrypted_content"]
+    # Encrypted reasoning items preserve stateless multi-turn continuity.
+    body["include"] = ["reasoning.encrypted_content"]
     if reasoning:
         if reasoning not in {"low", "medium", "high", "xhigh"}:
             raise BridgeError("reasoning must be low, medium, high, or xhigh")
@@ -273,7 +162,7 @@ def parse_response(data: dict[str, Any]) -> dict[str, Any]:
             reasoning.append({k: item[k] for k in ("id", "type", "encrypted_content", "summary") if k in item})
         elif kind == "function_call":
             tool_calls.append({"id": item.get("call_id") or item.get("id", ""),
-                               "name": item.get("name", ""),
+                               "name": _local_tool_name(item.get("name", "")),
                                "arguments": item.get("arguments") or "{}"})
         elif kind == "message":
             for part in item.get("content") or []:
@@ -330,28 +219,77 @@ def _sse_events(stream: Any) -> Iterator[dict[str, Any]]:
             raise BridgeError("Provider SSE stream ended mid-event")
 
 
+
+NO_RETRY_ERRORS = {
+    "subscription_sharing_user_not_eligible", "subscription_sharing_usage_limit_exceeded",
+    "subscription_sharing_unsupported_capability", "subscription_sharing_route_not_supported",
+    "subscription_sharing_invalid_user", "chatpass_v2_scope_not_authorized",
+    "chatpass_v2_invalid_authorization_context", "invalid_api_key", "insufficient_quota",
+}
+
+
+def _safe_error_code(value: Any) -> str:
+    if not isinstance(value, str) or len(value) > 100:
+        return "request_failed"
+    return value if value and all(x.isalnum() or x in "_-" for x in value) else "request_failed"
+
+
+def _http_failure(exc: urllib.error.HTTPError, auth: str) -> tuple[BridgeError, str]:
+    """Retain only safe code and request id. Do not echo error messages or tokens."""
+    request_id = exc.headers.get("x-request-id", "") if exc.headers else ""
+    if not (len(request_id) <= 120 and all(x.isalnum() or x in "_-" for x in request_id)):
+        request_id = ""
+    try:
+        payload = json.loads(exc.read(4096))
+    except (ValueError, AttributeError, TypeError):
+        payload = {}
+    error = payload.get("error") if isinstance(payload, dict) else None
+    error = error if isinstance(error, dict) else {}
+    code = _safe_error_code(error.get("code") or error.get("type"))
+    if auth == "chatgpt" and code == "subscription_sharing_usage_limit_exceeded":
+        return BridgeError("ChatGPT app usage limit reached; see ChatGPT Settings > Usage (subscription_sharing_usage_limit_exceeded)"), code
+    message = f"Responses HTTP {exc.code} ({code})"
+    param = error.get("param")
+    if isinstance(param, str) and 0 < len(param) <= 96 and all(x.isalnum() or x in "_- ." for x in param):
+        message += f" param={param}"
+    if request_id:
+        message += f" request_id={request_id}"
+    # Amplio's subprocess retry logic recognizes literal '(code NNN)' suffixes.
+    # Never retry access-control, invalid input, subscription caps or quota errors.
+    if exc.code in {429, 500, 502, 503, 504} and code not in NO_RETRY_ERRORS:
+        message += f" (code {exc.code})"
+    return BridgeError(message), code
+
+
+def _open_responses(body: bytes, auth: str):
+    """One forced SIWC refresh on generic 401, never a billing fallback."""
+    for attempt in range(2):
+        endpoint, headers = auth_headers(auth)
+        req = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
+        try:
+            return urllib.request.urlopen(req, timeout=1800)
+        except urllib.error.HTTPError as exc:
+            failure, code = _http_failure(exc, auth)
+            if (auth == "chatgpt" and attempt == 0 and exc.code == 401
+                    and code not in {"subscription_sharing_invalid_user"}):
+                try:
+                    siwc_auth.get_access_token(force_refresh=True,
+                                               previous_token=headers["Authorization"][7:])
+                except siwc_auth.AuthError as refresh_error:
+                    raise BridgeError(str(refresh_error)) from None
+                continue
+            raise failure from None
+        except urllib.error.URLError as exc:
+            raise BridgeError(f"Responses connection failed ({type(exc.reason).__name__})") from None
+    raise BridgeError("Responses authentication failure after refresh")
+
+
 def generate(req: dict[str, Any], auth: str, reasoning: str) -> Iterator[dict[str, Any]]:
     if not isinstance(req.get("model"), str) or not req.get("model"):
         raise BridgeError("Missing model in Amplio request")
     body = build_body(req, auth, reasoning)
-    endpoint, headers = auth_headers(auth)
     data = json.dumps(body, separators=(",", ":")).encode("utf-8")
-    request = urllib.request.Request(endpoint, data=data, headers=headers, method="POST")
-    try:
-        response = urllib.request.urlopen(request, timeout=1800)
-    except urllib.error.HTTPError as exc:
-        try:
-            raw = exc.read(8192)
-            payload = json.loads(raw)
-            error = payload.get("error") or {}
-            code = error.get("code") or error.get("type") or "request_failed"
-            detail = error.get("message") or ""
-            detail = detail[:600] if isinstance(detail, str) else ""
-        except (ValueError, AttributeError, TypeError):
-            code, detail = "request_failed", ""
-        raise BridgeError(f"Responses API HTTP {exc.code} ({code}): {detail}") from None
-    except urllib.error.URLError as exc:
-        raise BridgeError(f"Responses API connection failed ({type(exc.reason).__name__})") from None
+    response = _open_responses(data, auth)
     item_id_to_call: dict[str, str] = {}
     final = None
     with response:
@@ -366,7 +304,7 @@ def generate(req: dict[str, Any], auth: str, reasoning: str) -> Iterator[dict[st
                     if call_id:
                         item_id_to_call[event.get("item_id") or item.get("id", "")] = call_id
                         yield {"type": "delta", "tool_call_start": {
-                            "id": call_id, "name": item.get("name", "")}}
+                            "id": call_id, "name": _local_tool_name(item.get("name", ""))}}
             elif kind == "response.function_call_arguments.delta" and event.get("delta"):
                 call_id = item_id_to_call.get(event.get("item_id", "")) or event.get("call_id")
                 if call_id:
@@ -374,15 +312,20 @@ def generate(req: dict[str, Any], auth: str, reasoning: str) -> Iterator[dict[st
                         "id": call_id, "arguments_delta": event["delta"]}}
             elif kind == "response.completed":
                 final = event.get("response")
+                if not isinstance(final, dict) or final.get("status", "completed") != "completed":
+                    raise BridgeError("Responses stream did not complete successfully")
                 break
             elif kind == "response.incomplete":
-                final = event.get("response")
-                break
+                response_data = event.get("response") or {}
+                reason = _safe_error_code((response_data.get("incomplete_details") or {}).get("reason"))
+                raise BridgeError(f"Responses stream incomplete ({reason}); no successful final response")
             elif kind in {"response.failed", "error"}:
-                error = (event.get("response") or {}).get("error") or event.get("error") or {}
-                if isinstance(error, dict):
-                    error = error.get("message") or error.get("code") or "unknown error"
-                raise BridgeError(f"Responses API streaming failure: {str(error)[:400]}")
+                detail = (event.get("response") or {}).get("error") or event.get("error") or {}
+                code = _safe_error_code(detail.get("code")) if isinstance(detail, dict) else "request_failed"
+                if auth == "chatgpt" and code == "subscription_sharing_usage_limit_exceeded":
+                    raise BridgeError("ChatGPT app usage limit reached; see ChatGPT Settings > Usage (subscription_sharing_usage_limit_exceeded)")
+                suffix = " (code 503)" if code in {"subscription_sharing_usage_unavailable", "subscription_sharing_user_unavailable"} else ""
+                raise BridgeError(f"Responses stream failed ({code}){suffix}")
     if not isinstance(final, dict):
         raise BridgeError("Responses API ended without a completed or incomplete response")
     yield {"type": "final", "response": parse_response(final)}
@@ -440,7 +383,7 @@ def make_handler(auth: str, reasoning: str):
                 for result in generate(req, auth, reasoning):
                     self.wfile.write((json.dumps(result, ensure_ascii=False) + "\n").encode("utf-8"))
                     self.wfile.flush()
-            except (BridgeError, OSError, KeyError, TypeError, ValueError) as exc:
+            except (siwc_auth.AuthError, OSError, KeyError, TypeError, ValueError) as exc:
                 try:
                     self.wfile.write((json.dumps({"type": "error", "error": str(exc)}) + "\n").encode("utf-8"))
                     self.wfile.flush()
