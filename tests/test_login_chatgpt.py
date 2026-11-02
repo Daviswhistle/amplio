@@ -40,7 +40,7 @@ class LoginTests(unittest.TestCase):
         self.assertEqual(p["id_token_hint"], "id-hint")
         self.assertNotIn("agent_name_hint", p)
 
-    def test_missing_plan_scope_must_not_be_saved(self):
+    def test_missing_plan_scope_preserves_identity_and_prompts_reconsent(self):
         p = {"id_token": "id", "access_token": "access", "refresh_token": "refresh",
              "expires_in": 3600, "scope": "openid profile email offline_access resource.invoke"}
         with mock.patch.object(login, "validate_id_token", return_value={"sub": "user-1"}):
