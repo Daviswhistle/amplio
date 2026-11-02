@@ -159,6 +159,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/auth", s.handleAuth)
 	mux.HandleFunc("POST /api/auth/login", s.handleAuthLogin)
 
+	// OpenAI connections: credentials, OAuth start and status are owner-only.
+	// Neither credentials nor authorization URLs are available to shared viewers.
+	mux.HandleFunc("GET /api/connections", s.requireAuth(s.handleConnections))
+	mux.HandleFunc("POST /api/connections/api-key", s.requireAuth(s.handleSetAPIKey))
+	mux.HandleFunc("DELETE /api/connections/api-key", s.requireAuth(s.handleDeleteAPIKey))
+	mux.HandleFunc("POST /api/connections/chatgpt/start", s.requireAuth(s.handleBeginChatGPTLogin))
+	mux.HandleFunc("DELETE /api/connections/chatgpt", s.requireAuth(s.handleDisconnectChatGPT))
+
 	// Reads that span runs — require the token. Each would show a viewer of
 	// one shared run the others: their ids (the list and its counts, lessons'
 	// source runs), their live output (the all-runs stream), or what was

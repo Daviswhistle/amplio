@@ -151,7 +151,7 @@ class Callback(http.server.BaseHTTPRequestHandler):
         self.wfile.write(b"Authorization received. Return to your terminal.\n")
 
 
-def run(*, new_account: bool = False, timeout: int = 180) -> None:
+def run(*, new_account: bool = False, timeout: int = 180, headless: bool = False) -> None:
     host = host_id()
     try:
         previous = auth.read_saved()
@@ -171,9 +171,14 @@ def run(*, new_account: bool = False, timeout: int = 180) -> None:
         redirect = f"http://{CALLBACK_HOST}:{server.server_port}{CALLBACK_PATH}"
         params = authorize_params(client_id, redirect, host, state, nonce, verifier, previous)
         url = AUTHORIZE + "?" + urllib.parse.urlencode(params)
-        if not webbrowser.open(url):
-            raise auth.AuthError("Could not launch system browser; set BROWSER or use a desktop session")
-        print("Finish ChatGPT authorization in the browser. Waiting for callback ...")
+        if headless:
+            # The caller is the authenticated Amplio UI: it opens the URL on the
+            # operator's machine. Never emit a token or authorization code here.
+            print(json.dumps({"authorization_url": url}), flush=True)
+        else:
+            if not webbrowser.open(url):
+                raise auth.AuthError("Could not launch system browser; set BROWSER or use a desktop session")
+            print("Finish ChatGPT authorization in the browser. Waiting for callback ...")
         server.handle_request()
         answer = getattr(server, "result", None)
         if not answer:
@@ -211,9 +216,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--new-account", action="store_true", help="register a different ChatGPT account")
     parser.add_argument("--timeout", type=int, default=180)
+    parser.add_argument("--headless", action="store_true", help="print authorization URL as JSON for Amplio UI")
     args = parser.parse_args()
     try:
-        run(new_account=args.new_account, timeout=args.timeout)
+        run(new_account=args.new_account, timeout=args.timeout, headless=args.headless)
     except (auth.AuthError, OSError) as exc:
         print(f"ChatGPT sign-in failed: {exc}", file=sys.stderr)
         raise SystemExit(1) from None

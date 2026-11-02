@@ -40,14 +40,14 @@ class LoginTests(unittest.TestCase):
         self.assertEqual(p["id_token_hint"], "id-hint")
         self.assertNotIn("agent_name_hint", p)
 
-    def test_missing_plan_scope_preserves_identity_and_prompts_reconsent(self):
+    def test_missing_plan_scope_must_not_be_saved(self):
         p = {"id_token": "id", "access_token": "access", "refresh_token": "refresh",
              "expires_in": 3600, "scope": "openid profile email offline_access resource.invoke"}
         with mock.patch.object(login, "validate_id_token", return_value={"sub": "user-1"}):
             result = login.validated_record(p, "oaiapp_1", "nonce", "host")
         self.assertNotIn(auth.PLAN_SCOPE, result["scopes"])
         reauthorize = login.authorize_params("oaiapp_1", "http://127.0.0.1:5000/auth/callback",
-                                         "host", "state", "nonce", "verifier", result)
+                                             "host", "state", "nonce", "verifier", result)
         self.assertEqual(reauthorize["prompt"], "consent")
 
     def test_oidc_payload_validated_before_record(self):
@@ -82,6 +82,32 @@ class LoginTests(unittest.TestCase):
             tampered = jwt.encode(claims, other, algorithm="RS256")
             with self.assertRaisesRegex(auth.AuthError, "ID token"):
                 login.validate_id_token(tampered, "oaiapp_test", "expected")
+
+
+    def test_headless_login_returns_url_without_opening_browser(self):
+        import contextlib
+        import io
+        server = mock.Mock()
+        server.server_port = 43210
+        server.handle_request.side_effect = lambda: setattr(server, "result", {
+            "state": ["fixed-state"], "error": ["access_denied"]
+        })
+        out = io.StringIO()
+        with mock.patch.object(login, "host_id", return_value="urn:uuid:fake"), \
+             mock.patch.object(auth, "read_saved", side_effect=auth.AuthError("not connected")), \
+             mock.patch.object(login.secrets, "token_urlsafe", side_effect=["fixed-state", "fixed-nonce", "verifier"]), \
+             mock.patch.object(login.http.server, "HTTPServer", return_value=server), \
+             mock.patch.object(login.webbrowser, "open") as browser, \
+             contextlib.redirect_stdout(out):
+            with self.assertRaisesRegex(auth.AuthError, "declined"):
+                login.run(headless=True)
+        browser.assert_not_called()
+        line = json.loads(out.getvalue().splitlines()[0])
+        parsed = urllib.parse.urlparse(line["authorization_url"])
+        self.assertEqual(parsed.hostname, "auth.openai.com")
+        params = urllib.parse.parse_qs(parsed.query)
+        self.assertEqual(params["redirect_uri"], ["http://127.0.0.1:43210/auth/callback"])
+        self.assertEqual(params["state"], ["fixed-state"])
 
 
 if __name__ == "__main__":

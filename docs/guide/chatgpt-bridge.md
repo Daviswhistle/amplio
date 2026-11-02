@@ -1,5 +1,8 @@
 # OpenAI Responses bridge: ChatGPT plan or API key
 
+For an optional owner-only browser UI that handles sign-in, credential storage,
+model menu setup and smoke tests, see [web connections](web-connections.md).
+
 This optional **experimental** subprocess bridge connects Amplio to the public
 OpenAI Responses API with two independently configured authentication modes.
 Neither mode changes the Go core or falls back to another billing method.

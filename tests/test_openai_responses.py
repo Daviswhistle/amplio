@@ -243,5 +243,35 @@ class ResponseTests(unittest.TestCase):
         self.assertNotIn("(code 429)", str(ctx.exception))
 
 
+class ConnectionFileTests(unittest.TestCase):
+    def test_owner_only_api_key_file_and_environment_precedence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "openai_api_key"
+            path.write_text("sk-file-secret\n", encoding="utf-8")
+            path.chmod(0o600)
+            with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "", "AMPLIO_OPENAI_KEY_FILE": str(path)}):
+                endpoint, headers = bridge.auth_headers("api")
+                self.assertEqual(endpoint, bridge.API_ENDPOINT)
+                self.assertEqual(headers["Authorization"], "Bearer sk-file-secret")
+            with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-env-key", "AMPLIO_OPENAI_KEY_FILE": str(path)}):
+                _, headers = bridge.auth_headers("api")
+                self.assertEqual(headers["Authorization"], "Bearer sk-env-key")
+
+    def test_api_key_file_refuses_world_readable_and_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "key"
+            path.write_text("sk-test-key", encoding="utf-8")
+            path.chmod(0o644)
+            with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "", "AMPLIO_OPENAI_KEY_FILE": str(path)}):
+                with self.assertRaisesRegex(bridge.BridgeError, "owner-only"):
+                    bridge.auth_headers("api")
+                path.chmod(0o600)
+                shortcut = Path(directory) / "shortcut"
+                shortcut.symlink_to(path)
+                with mock.patch.dict(os.environ, {"AMPLIO_OPENAI_KEY_FILE": str(shortcut)}):
+                    with self.assertRaisesRegex(bridge.BridgeError, "owner-only"):
+                        bridge.auth_headers("api")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -13,12 +13,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import socketserver
 import sys
 import urllib.error
 import urllib.request
 from http import server as http_server
 from typing import Any, Iterator
+from pathlib import Path
 
 import siwc_auth
 
@@ -38,7 +40,22 @@ def auth_headers(auth: str) -> tuple[str, dict[str, str]]:
     if auth == "api":
         key = os.environ.get("OPENAI_API_KEY", "")
         if not key:
-            raise BridgeError("OPENAI_API_KEY missing for API billing mode")
+            # The UI stores the key as a 0600 file, rather than copying secrets
+            # into the server environment inherited by arbitrary shell tools.
+            file_path = os.environ.get("AMPLIO_OPENAI_KEY_FILE", "")
+            if file_path:
+                try:
+                    p = Path(file_path)
+                    info = p.lstat()
+                    if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+                        raise BridgeError("API key file must be regular and owner-only (0600)")
+                    key = p.read_text(encoding="utf-8").strip()
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    raise BridgeError("Unable to read API key file securely") from None
+        if not key:
+            raise BridgeError("OPENAI_API_KEY missing; connect an API key in Amplio settings")
         headers["Authorization"] = "Bearer " + key
         if os.environ.get("OPENAI_ORGANIZATION"):
             headers["OpenAI-Organization"] = os.environ["OPENAI_ORGANIZATION"]

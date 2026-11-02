@@ -24,6 +24,7 @@ import type {
   EventDTO,
   ObservationDTO,
   ModelMenu,
+  OpenAIConnectionStatus,
   ChatFeed,
   Trajectory,
   RunReport,
@@ -278,6 +279,13 @@ export const api = {
   updateRun: (id: string, body: RunUpdate) =>
     req<void>(`/runs/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   getSysStat: () => req<SysStat>("/sysstat"),
+  getOpenAIConnections: () => req<OpenAIConnectionStatus>("/connections"),
+  setOpenAIAPIKey: (key: string) =>
+    req<void>("/connections/api-key", { method: "POST", body: JSON.stringify({ key }) }),
+  deleteOpenAIAPIKey: () => req<void>("/connections/api-key", { method: "DELETE" }),
+  beginChatGPTLogin: () =>
+    req<{ authorization_url: string }>("/connections/chatgpt/start", { method: "POST" }),
+  disconnectChatGPT: () => req<void>("/connections/chatgpt", { method: "DELETE" }),
   listModels: () => req<ModelMenu>("/models"),
   addModel: (spec: string) =>
     req<void>("/models", { method: "POST", body: JSON.stringify({ spec }) }),

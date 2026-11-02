@@ -34,6 +34,15 @@ export interface ModelMenu {
   models: ModelEntry[];
 }
 
+// Owner-only connection overview. Never includes bearer tokens or API keys.
+export interface OpenAIConnectionStatus {
+  api_key_source: 'none' | 'stored' | 'environment';
+  chatgpt_connected: boolean;
+  chatgpt_email: string;
+  login_pending: boolean;
+  bridge_path: string;
+}
+
 export interface RootInfo {
   session_id: string;
   agent_type: string;

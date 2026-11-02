@@ -89,6 +89,11 @@ func addrFrom(flagVal, envVal, cfgVal string) string {
 
 func executeServe(cfg config.Config, listenOverride, lendOverride string) error {
 	dataDir := config.DataDir()
+	// Export only the path to owner-only credential storage. Never propagate
+	// the API key itself into arbitrary agent shell subprocess environments.
+	if err := server.ConfigureOpenAIKeyFile(dataDir); err != nil {
+		return fmt.Errorf("configure OpenAI credential path: %w", err)
+	}
 	// System tiers are already validated by resolveConfig. --listen has its own
 	// serve-only precedence (flag > env > resolved config). serve additionally
 	// needs the agent model menu for the manager provider + UI default.

@@ -117,3 +117,15 @@ uses only the public API endpoint, not ChatGPT's private backend APIs.
 See [setup, security and verification limitations](docs/guide/chatgpt-bridge.md).
 The integration remains experimental until live sign-in, model tool calls and
 multi-agent restart recovery are verified.
+
+### Browser-based connection setup (fork)
+
+A new owner-only **Connections** page lets you start ChatGPT authorization, save
+or remove a locally stored OpenAI API key, register a per-run model, and test a
+specific model with one actual inference request. Existing `OPENAI_API_KEY`
+environment configuration is respected rather than overwritten.
+
+For a new installation, `./scripts/bootstrap_openai.sh --chatgpt` (or `--api`)
+creates a minimal config without storing secrets. See the
+[web connection guide](docs/guide/web-connections.md) for browser callback
+limitations, owner-token requirements, billing and security caveats.
