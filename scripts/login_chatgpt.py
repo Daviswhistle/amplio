@@ -63,6 +63,8 @@ def authorize_params(issued_id: str | None, redirect: str, host: str,
     if issued_id:
         if previous and previous.get("id_token"):
             result["id_token_hint"] = previous["id_token"]
+        if previous and auth.PLAN_SCOPE not in previous.get("scopes", []):
+            result["prompt"] = "consent"  # supported re-consent flow
     else:
         result["agent_name_hint"] = "Amplio"
     return result
@@ -111,11 +113,13 @@ def exchange_code(code: str, client_id: str, verifier: str, redirect: str) -> di
 
 def validated_record(payload: dict, client_id: str, nonce: str, host: str) -> dict:
     if not all(isinstance(payload.get(x), str) and payload[x] for x in
-               ("id_token", "access_token", "refresh_token", "scope")):
+               ("id_token", "access_token")):
         raise auth.AuthError("OAuth token response missing required credentials or scopes")
-    scopes = payload["scope"].split()
-    if auth.PLAN_SCOPE not in scopes or "resource.invoke" not in scopes:
-        raise auth.AuthError("ChatGPT plan permission was declined or unavailable; no token saved")
+    if not isinstance(payload.get("scope", ""), str):
+        raise auth.AuthError("OAuth scope response is invalid")
+    scopes = payload.get("scope", "").split()
+    if auth.PLAN_SCOPE in scopes and ("resource.invoke" not in scopes or not payload.get("refresh_token")):
+        raise auth.AuthError("ChatGPT plan scope needs resource permission and a renewable grant")
     if payload.get("token_type", "Bearer").lower() != "bearer":
         raise auth.AuthError("Unsupported OAuth token type")
     if not isinstance(payload.get("expires_in"), (int, float)) or payload["expires_in"] <= 0:
@@ -125,7 +129,7 @@ def validated_record(payload: dict, client_id: str, nonce: str, host: str) -> di
         "email": claims.get("email", ""), "issuer": "https://auth.openai.com",
         "subject": claims["sub"], "client_id": client_id, "ext_agent_host_id": host,
         "id_token": payload["id_token"], "access_token": payload["access_token"],
-        "refresh_token": payload["refresh_token"], "token_type": "Bearer",
+        "refresh_token": payload.get("refresh_token", ""), "token_type": "Bearer",
         "expires_in": payload["expires_in"], "scopes": scopes,
         "saved_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
@@ -195,7 +199,10 @@ def run(*, new_account: bool = False, timeout: int = 180) -> None:
                          previous.get("client_id") != record["client_id"]):
             raise auth.AuthError("Returning ChatGPT account identity mismatch")
         auth.save_validated(record, expected_subject=previous["subject"] if previous else None)
-        print("ChatGPT plan connected to Amplio. Credentials stored locally with owner-only permissions.")
+        if auth.PLAN_SCOPE in record["scopes"]:
+            print("ChatGPT plan connected to Amplio. Credentials stored locally with owner-only permissions.")
+        else:
+            print("ChatGPT identity connected; plan access was not granted. Run login again to request consent.")
     finally:
         server.server_close()
 
