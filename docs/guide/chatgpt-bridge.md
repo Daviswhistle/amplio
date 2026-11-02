@@ -43,6 +43,10 @@ For a different ChatGPT account, explicitly run:
 
     ./scripts/login_chatgpt.sh --new-account
 
+If sign-in succeeds but ChatGPT plan permission is declined, Amplio preserves
+only the verified sign-in state, refuses inference, and requests explicit
+re-consent on the next login attempt. It never switches to API billing.
+
 The initial integration supports one active account per SIWC home. For multiple
 isolated accounts, set a distinct AMPLIO_SIWC_HOME when running both the login
 script and the Amplio server. During refresh, the issued client ID and the
