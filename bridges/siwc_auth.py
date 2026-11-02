@@ -96,12 +96,14 @@ def _locked() -> Iterator[None]:
 def save_validated(data: dict[str, Any], *, expected_subject: str | None = None) -> None:
     """Called only after the login CLI validates a signed OIDC ID token."""
     if not all(isinstance(data.get(k), str) and data[k] for k in
-               ("client_id", "subject", "issuer", "access_token", "refresh_token", "id_token")):
+               ("client_id", "subject", "issuer", "access_token", "id_token")):
         raise AuthError("Refusing to persist incomplete OAuth credentials")
     if data["issuer"] != "https://auth.openai.com":
         raise AuthError("Unexpected OAuth issuer")
-    if PLAN_SCOPE not in data.get("scopes", []):
-        raise AuthError("ChatGPT plan scope was not granted; OAuth sign-in cannot enable inference")
+    if not isinstance(data.get("scopes"), list):
+        raise AuthError("OAuth credential record missing granted scopes")
+    if PLAN_SCOPE in data["scopes"] and not data.get("refresh_token"):
+        raise AuthError("ChatGPT plan usage requires a renewable access token")
     with _locked():
         if expected_subject is not None:
             previous = _read(credential_path())
@@ -172,6 +174,8 @@ def _update_refresh(data: dict[str, Any]) -> dict[str, Any]:
                     "saved_at": datetime.datetime.now(datetime.timezone.utc).isoformat()})
     # Without validated OIDC identity, do not replace the original id_token hint.
     if "scope" in payload:
+        if not isinstance(payload["scope"], str):
+            raise AuthError("OAuth refresh returned malformed scope")
         updated["scopes"] = payload["scope"].split()
         if PLAN_SCOPE not in updated["scopes"]:
             # Save the reduced scopes first, so no later subprocess can use
