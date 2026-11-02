@@ -42,9 +42,10 @@ class CredentialsTests(unittest.TestCase):
         self.assertEqual(auth.get_access_token(), "old")
         self.assertEqual(auth.credential_path().stat().st_mode & 0o777, 0o600)
         self.assertEqual(auth.home().stat().st_mode & 0o777, 0o700)
-        with self.assertRaisesRegex(auth.AuthError, "not granted"):
-            auth.save_validated(record(scope=False))
-        self.assertEqual(auth.get_access_token(), "old")
+        auth.save_validated(record(scope=False))
+        with self.assertRaisesRegex(auth.AuthError, "permission not granted"):
+            auth.get_access_token()
+        self.assertNotIn(auth.PLAN_SCOPE, auth.read_saved()["scopes"])
 
     def test_no_issued_client_or_identity_change(self):
         auth.save_validated(record())
