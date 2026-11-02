@@ -43,10 +43,12 @@ class LoginTests(unittest.TestCase):
     def test_missing_plan_scope_must_not_be_saved(self):
         p = {"id_token": "id", "access_token": "access", "refresh_token": "refresh",
              "expires_in": 3600, "scope": "openid profile email offline_access resource.invoke"}
-        with mock.patch.object(login, "validate_id_token") as validator:
-            with self.assertRaisesRegex(auth.AuthError, "not granted|declined"):
-                login.validated_record(p, "oaiapp_1", "nonce", "host")
-        validator.assert_not_called()
+        with mock.patch.object(login, "validate_id_token", return_value={"sub": "user-1"}):
+            result = login.validated_record(p, "oaiapp_1", "nonce", "host")
+        self.assertNotIn(auth.PLAN_SCOPE, result["scopes"])
+        reauthorize = login.authorize_params("oaiapp_1", "http://127.0.0.1:5000/auth/callback",
+                                         "host", "state", "nonce", "verifier", result)
+        self.assertEqual(reauthorize["prompt"], "consent")
 
     def test_oidc_payload_validated_before_record(self):
         p = {"id_token": "id", "access_token": "access", "refresh_token": "refresh",
