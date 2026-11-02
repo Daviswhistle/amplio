@@ -117,6 +117,22 @@ class CredentialsTests(unittest.TestCase):
         with self.assertRaisesRegex(auth.AuthError, "permission not granted"):
             auth.get_access_token()
 
+    def test_plan_scope_without_resource_invoke_is_rejected(self):
+        invalid = record()
+        invalid["scopes"] = [auth.PLAN_SCOPE]
+        with self.assertRaisesRegex(auth.AuthError, "resource.invoke"):
+            auth.save_validated(invalid)
+
+    def test_refresh_missing_resource_permission_disables_plan_usage(self):
+        auth.save_validated(record(expires=5))
+        payload = {"access_token": "renewed", "refresh_token": "rotated", "expires_in": 3600,
+                   "scope": auth.PLAN_SCOPE}
+        with mock.patch.object(auth.urllib.request, "urlopen", return_value=io.BytesIO(json.dumps(payload).encode())):
+            with self.assertRaisesRegex(auth.AuthError, "permission removed"):
+                auth.get_access_token()
+        with self.assertRaisesRegex(auth.AuthError, "permission not granted"):
+            auth.get_access_token()
+
     def test_network_failure_preserves_token(self):
         auth.save_validated(record(expires=5))
         error = urllib.error.URLError("offline")
