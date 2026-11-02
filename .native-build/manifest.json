@@ -1,0 +1,31 @@
+{
+ "base":"bfdfaa57cf80129723d258b5c3006ac88b4ada03",
+ "reset":{
+  "internal/server/server.go":"084aba7a353676ebc112298f7b99cb73f7da9390",
+  "frontend/src/lib/api.ts":"084aba7a353676ebc112298f7b99cb73f7da9390",
+  "frontend/src/lib/types.ts":"084aba7a353676ebc112298f7b99cb73f7da9390",
+  "README.md":"084aba7a353676ebc112298f7b99cb73f7da9390"
+ },
+ "patches":{
+  "cmd/amplio/serve.go":[
+   {"find":"\t\"strconv\"\n","replace":"\t\"strconv\"\n\t\"sync\"\n"},
+   {"find":"cfg, err := resolveConfig(cmd)","replace":"cfg, err := resolveWebConfig(cmd)"},
+   {"find":"\t// Export only the path to owner-only credential storage. Never propagate\n\t// the API key itself into arbitrary agent shell subprocess environments.\n\tif err := server.ConfigureOpenAIKeyFile(dataDir); err != nil {\n\t\treturn fmt.Errorf(\"configure OpenAI credential path: %w\", err)\n\t}\n","replace":""},
+   {"find":"\t// System tiers are already validated by resolveConfig. --listen has its own\n\t// serve-only precedence (flag > env > resolved config). serve additionally\n\t// needs the agent model menu for the manager provider + UI default.\n","replace":"\t// The web server starts before credentials/models exist. System bindings\n\t// become usable when the owner completes Providers; headless stays strict.\n"},
+   {"find":"\tif cfg.DefaultLLM() == \"\" {\n\t\treturn fmt.Errorf(\"no agent model: set run.llms in %s\", config.ConfigPath(dataDir))\n\t}\n","replace":""},
+   {"find":"\tdefer func() { _ = lock.Unlock() }()\n","replace":"\tdefer func() { _ = lock.Unlock() }()\n\tcfg, accounts, err := prepareWebModels(cfg)\n\tif err != nil { return err }\n\tdefer accounts.Close()\n"},
+   {"find":"\trecovered := recoverRuns(ctx, store, mgr)\n\tslog.Info(\"recovery scheduled\", \"sessions\", recovered)\n\n\t// Backfill any missing reports for already-concluded runs, in the background\n\t// (off the startup path) and sequentially (one at a time, to bound HQ-LLM\n\t// load). Idempotent: runs already covered by a report are cheap no-ops.\n\tgo backfillReports(ctx, store, fin)\n","replace":"\t// Do not invoke models before first-time setup. Existing configured\n\t// installations recover normally; completing setup activates recovery once.\n\tvar activated sync.Once\n\tactivate := func() {\n\t\tactivated.Do(func() { go func() {\n\t\t\tif ctx.Err() != nil { return }\n\t\t\trecovered := recoverRuns(ctx, store, mgr)\n\t\t\tslog.Info(\"recovery scheduled\", \"sessions\", recovered)\n\t\t\tbackfillReports(ctx, store, fin)\n\t\t}() })\n\t}\n\tselected, err := accounts.Settings()\n\tif err != nil { return err }\n\tif selected.Ready() { activate() }\n"},
+   {"find":"handler := amlog.HTTPMiddleware(srv.Handler())","replace":"handler := amlog.HTTPMiddleware(srv.ProviderHandler(accounts, activate))"}
+  ],
+  "cmd/amplio/main.go":[
+   {"find":"\troot.AddCommand(serveCmd(), notifyCmd(), headlessCmd(), clientCmd())","replace":"\t// A plain launch opens the same setup-capable application as `serve`.\n\troot.Args = cobra.NoArgs\n\troot.RunE = func(cmd *cobra.Command, _ []string) error {\n\t\tcfg, err := resolveWebConfig(cmd)\n\t\tif err != nil { return err }\n\t\treturn executeServe(cfg, \"\", \"\")\n\t}\n\troot.AddCommand(serveCmd(), notifyCmd(), headlessCmd(), clientCmd())"}
+  ],
+  "frontend/src/lib/route.ts":[{"find":"{ label: 'Connections', href: '/connections', icon: KeyIcon }","replace":"{ label: 'Providers', href: '/providers', icon: KeyIcon }"}],
+  "frontend/src/routes/+layout.svelte":[
+   {"find":"import { onMount, untrack } from 'svelte';","replace":"import { onMount, untrack } from 'svelte';\n\timport { goto } from '$app/navigation';\n\timport { providers } from '$lib/providers';"},
+   {"find":"\tlet { children } = $props();","replace":"\tlet { children } = $props();\n\n\t// A new install reaches setup from the application itself, not a shell\n\t// bootstrap. Never redirect shared/read-only viewers or an active run.\n\t$effect(() => {\n\t\tif (!auth.ready || !auth.authed || page.url.pathname !== '/') return;\n\t\tlet cancelled = false;\n\t\tvoid providers.status().then((status) => {\n\t\t\tif (!cancelled && status.setup_required) void goto('/providers', { replaceState: true });\n\t\t}).catch(() => {});\n\t\treturn () => { cancelled = true; };\n\t});"}
+  ],
+  "README.md":[{"find":"## Quick start\n","replace":"## First run: ChatGPT or OpenAI API\n\nAfter building, run `./amplio` and open its private startup URL. The **Providers**\npage handles ChatGPT sign-in, API key storage, account model discovery, tests and\nmodel defaults. No config file, Python or separate setup/login executable is\nrequired. Settings apply without a restart. See [Providers](docs/guide/providers.md)\nfor remote browser completion, migration and verification boundaries.\n\nThe native integration has automated mock-provider and browser coverage; live\nOpenAI account eligibility and model access still require an authorized account.\n\n## Quick start (manual configuration)\n"}]
+ },
+ "delete":["internal/server/connections.go","internal/server/connections_test.go","bridges/openai_responses.py","bridges/siwc_auth.py","scripts/login_chatgpt.sh","scripts/login_chatgpt.py","scripts/bootstrap_openai.sh","tests/test_login_chatgpt.py","tests/test_openai_responses.py","tests/test_siwc_auth.py",".github/workflows/openai-connections.yml"]
+}
