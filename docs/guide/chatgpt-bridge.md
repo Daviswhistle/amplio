@@ -1,74 +1,116 @@
-# Amplio: OpenAI Responses + ChatGPT subscription bridge
+# OpenAI Responses bridge: ChatGPT plan or API key
 
-This is a **drop-in experimental bridge** for [google-deepmind/amplio](https://github.com/google-deepmind/amplio). It uses the existing `subprocess` provider without changing Amplio's Go core. The two modes are explicitly isolated:
+This optional **experimental** subprocess bridge connects Amplio to the public
+OpenAI Responses API with two independently configured authentication modes.
+Neither mode changes the Go core or falls back to another billing method.
 
-| Mode | Backend | Credentials | Billing |
+| Auth mode | Credential | Endpoint | Accounting |
 | --- | --- | --- | --- |
-| `auth=api` | Public OpenAI Responses API | `OPENAI_API_KEY` | OpenAI API organization; eligible promotional API credits apply |
-| `auth=chatgpt` | ChatGPT Codex subscription endpoint | Separate, official Codex CLI login | ChatGPT/Codex subscription allowance, **not** API credits |
+| chatgpt | Official open-source Sign in with ChatGPT (SIWC) OAuth | https://api.openai.com/v1/responses | Eligible ChatGPT plan |
+| api | OPENAI_API_KEY | Same public endpoint | OpenAI API billing; eligible promotional credits may apply |
 
-## Copy into your Amplio fork
+## Requirements and build
 
-Copy the `bridges/openai_responses.py` and `scripts/login_chatgpt.sh` files into the matching paths in your Amplio checkout, then make them executable:
+- Linux, macOS or WSL with Python 3.10+ (the Amplio subprocess transport uses
+  Unix sockets, and credential refresh uses POSIX file locks).
+- Build Amplio as usual with make build. The runtime bridge is Python standard
+  library only. The *interactive sign-in CLI* additionally requires PyJWT with
+  cryptographic signature verification:
 
-```bash
-chmod +x bridges/openai_responses.py scripts/login_chatgpt.sh
-python3 -m unittest discover -s tests -p 'test_openai_responses.py' -v
-```
+    python3 -m pip install 'PyJWT[crypto]>=2.10,<3'
 
-Amplio's subprocess bridge uses Unix sockets; use Linux, macOS or WSL rather than assuming native Windows compatibility. Build Amplio as described in upstream README (`make build`, Go and Node.js required).
+- Do not test agent shell execution on a machine containing sensitive files.
+  Amplio does not sandbox the shell.
 
-## API credit mode
+## Connect a ChatGPT plan (official dynamic OAuth registration)
 
-Set `OPENAI_API_KEY` in the shell where `amplio serve` runs. Choose the correct project/organization for your activated credits. Optional: `OPENAI_ORGANIZATION`, `OPENAI_PROJECT`. The bridge never stores these values in the fork.
+First, authorize the app in a local browser:
 
-Add to `~/.amplio/config.toml` (replace `/absolute/path/...` and the model ID with models available in your API project):
+    ./scripts/login_chatgpt.sh
 
-```toml
-system_llm_hq = "subprocess{bin=/absolute/path/to/amplio/bridges/openai_responses.py}:YOUR_API_MODEL?auth=api"
-system_llm_fast = "subprocess{bin=/absolute/path/to/amplio/bridges/openai_responses.py}:YOUR_FAST_API_MODEL?auth=api"
+The sign-in CLI uses the documented dynamic registration client, stable host
+identifier, 127.0.0.1 callback, PKCE S256, state and nonce. It validates the
+signed ID token against the public OpenAI JWKS (issuer, audience, expiration,
+nonce and signature), checks the granted chatgpt.tokens.use.direct scope, and
+saves the issued client ID for future sign-ins. A separate Codex CLI login,
+Codex auth.json, secret client ID or private ChatGPT backend is not used.
 
-[run]
-llms = [
-  "subprocess{bin=/absolute/path/to/amplio/bridges/openai_responses.py}:YOUR_API_MODEL?auth=api&reasoning=high#API",
-]
-```
+Credentials are stored in the per-user directory
+~/.config/amplio-chatgpt/siwc (owner-only 0700) and account.json (0600).
+All token values stay outside Git, logs and run artifacts. Multiple Amplio
+bridge subprocesses coordinate rotating refresh tokens with a file lock.
+For a different ChatGPT account, explicitly run:
 
-Usage is paid by the linked API organization. An activated promotional credit is applied before purchased credits. **This bridge has no credit-only hard stop:** if additional paid balance or auto-recharge is enabled, requests may continue after promotional credits run out. Check API billing configuration before unattended runs.
+    ./scripts/login_chatgpt.sh --new-account
 
-## ChatGPT subscription mode
+The initial integration supports one active account per SIWC home. For multiple
+isolated accounts, set a distinct AMPLIO_SIWC_HOME when running both the login
+script and the Amplio server. During refresh, the issued client ID and the
+Responses resource are supplied. Confirmed revocation stops plan inference;
+temporary network failures do not erase the saved grant.
 
-Use the official Codex CLI for OAuth; *do not* copy your everyday `~/.codex/auth.json`. Create a separate `CODEX_HOME` for Amplio, so refresh-token rotation will not invalidate your normal Codex sessions:
+## Connect OpenAI API billing / eligible promotional credits
 
-```bash
-./scripts/login_chatgpt.sh
-```
+Export OPENAI_API_KEY in the environment that launches Amplio. Optional
+OPENAI_ORGANIZATION and OPENAI_PROJECT select the intended API project.
+Do not store API secrets in config.toml. The bridge does not enforce a
+promotional-credit-only cutoff: charges may continue after credits run out.
+Review billing limits and auto-recharge before unattended API-key runs.
 
-It creates `~/.config/amplio-chatgpt/codex-home/config.toml` with `cli_auth_credentials_store = "file"` if missing, then runs the official `codex login`. The token lives at `~/.config/amplio-chatgpt/codex-home/auth.json` (mode `0600`), not inside the Git repo. If the Codex CLI changes its file format or credential handling, this bridge may need an update. To point to an alternate dedicated Codex directory, set `AMPLIO_CODEX_HOME` for both the login script and Amplio server; for an alternate credentials file, set `AMPLIO_CODEX_AUTH_FILE` for the server. Separate subprocesses coordinate refresh-token rotation using a file lock.
+## Amplio model configuration
 
-Add an independent model entry:
+Replace the example model IDs with ones available in your ChatGPT account
+or API project. For account-specific model discovery, see OpenAI's SIWC
+Models and inference documentation (https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference).
 
-```toml
-[run]
-llms = [
-  "subprocess{bin=/absolute/path/to/amplio/bridges/openai_responses.py}:YOUR_SUBSCRIPTION_MODEL?auth=chatgpt&reasoning=high#ChatGPT",
-  "subprocess{bin=/absolute/path/to/amplio/bridges/openai_responses.py}:YOUR_API_MODEL?auth=api&reasoning=high#API",
-]
-```
+    system_llm_hq   = "subprocess{bin=/absolute/path/amplio/bridges/openai_responses.py}:gpt-6.1-sol?auth=chatgpt"
+    system_llm_fast = "subprocess{bin=/absolute/path/amplio/bridges/openai_responses.py}:YOUR_FAST_API_MODEL?auth=api"
 
-Unlike API mode, the ChatGPT subscription backend is not a general, versioned public API; compatibility and available model IDs can change. The bridge obtains initial OAuth via Codex CLI and refreshes its *dedicated* token using the currently public Codex OAuth client. Verify both a real multi-turn tool call and an OAuth refresh before relying on it for long autonomous tasks.
+    [run]
+    llms = [
+      "subprocess{bin=/absolute/path/amplio/bridges/openai_responses.py}:gpt-6.1-sol?auth=chatgpt&reasoning=high#ChatGPT",
+      "subprocess{bin=/absolute/path/amplio/bridges/openai_responses.py}:YOUR_API_MODEL?auth=api&reasoning=high#API",
+    ]
 
-## Protocol and state
+The server process reads AMPLIO_SIWC_HOME and OPENAI_API_KEY independently.
 
-- `POST /generate` follows Amplio's NDJSON protocol (`delta`, `final`, `error`).
-- OpenAI Responses `function_call`/`function_call_output` items map to Amplio tool calls and tool results.
-- Responses output items (including encrypted reasoning, tool calls, and assistant phase) are saved to `provider_extra` and replayed with the matching assistant turn; this follows the documented stateless reasoning pattern. API mode explicitly asks for `reasoning.encrypted_content`. No plain internal reasoning is deliberately exposed.
-- `store: false` is used in both modes. Errors in one mode do not fall back to the other; this prevents accidental API spending.
-- Only the shell process running Amplio gets the API key; ChatGPT refresh credentials stay in a private Codex home.
-- OpenAI API and ChatGPT subscription usage/permissions follow different OpenAI policies.
+## Protocol, failure handling and current limits
 
-## Validation status
+- Uses Amplio's NDJSON bridge protocol over a Unix socket. Complete responses,
+  tool-call IDs, tool results, usage, and encrypted reasoning/output items
+  are preserved and replayed as needed for stateless multi-turn requests.
+- Both modes use stream=true, store=false and send full history. Amplio's
+  system instructions are sent as the supported instructions field.
+- SIWC plan requests group local function tools inside an amplio namespace
+  and map namespaced responses back to the local tool registry. The currently
+  unsupported SIWC request fields max_output_tokens and temperature are omitted
+  for plan usage; API-key mode may send both.
+- Ordinary rate limits and transient service failures are reported in the
+  retryable form Amplio understands. ChatGPT plan usage-limit failures do not
+  retry or switch to API billing. Only response.completed denotes success.
+- Current integration uses one selected SIWC account per credential directory.
+  No session data is sent to hosted conversation-storage endpoints.
 
-Offline unit tests cover message/tool translation, stream event parsing, token refresh file rotation, and lack of unintended auth fallback. **No live model calls or end-to-end Amplio installation have been performed here.** First validate in an isolated workspace with a trivial shell/tool test, then a two-step tool sequence, then simulate a server restart.
+## Offline verification
 
-Sources: [Amplio bridges protocol](https://github.com/google-deepmind/amplio/blob/main/bridges/README.md), [Amplio model configuration](https://github.com/google-deepmind/amplio/blob/main/docs/guide/models.md), [Cline ChatGPT OAuth implementation](https://github.com/cline/cline/blob/main/sdk/packages/core/src/auth/codex.ts), [OpenAI API credit benefit](https://help.openai.com/en/articles/20001626-api-credits-benefit-for-eligible-chatgpt-subscriptions).
+    python3 -m unittest discover -s tests -p 'test*.py' -v
+    python3 -m py_compile bridges/openai_responses.py bridges/siwc_auth.py scripts/login_chatgpt.py
+    bash -n scripts/login_chatgpt.sh
+
+The offline tests exercise OAuth parameters, OIDC signature/audience/nonce
+validation, permission scopes, file security and token rotation, response/tool
+round-tripping, stream errors, HTTP 429 classification, and Unix socket framing.
+
+**Not verified in an OpenAI account yet:** live SIWC browser registration,
+real API-key/plan model calls, multi-agent server restart, and whether
+promotional API credits pay for a specific request. Keep this integration
+experimental until those checks pass.
+
+## References
+
+- OpenAI official open-source SIWC overview:
+  https://developers.openai.com/siwc/token-sharing-open-source
+- Registration and sign-in: https://developers.openai.com/siwc/token-sharing-open-source/sign-in
+- Preview limitations: https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations
+- Errors and recovery: https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery
+- Amplio bridge protocol: https://github.com/google-deepmind/amplio/blob/main/bridges/README.md
