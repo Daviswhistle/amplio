@@ -242,5 +242,6 @@ class ResponseTests(unittest.TestCase):
                 list(bridge.generate({"model": "gpt-test"}, "chatgpt", ""))
         self.assertNotIn("(code 429)", str(ctx.exception))
 
+
 if __name__ == "__main__":
     unittest.main()
